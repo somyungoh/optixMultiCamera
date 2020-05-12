@@ -928,15 +928,19 @@ void createSBT( WhittedState &state )
 
         std::shared_ptr<EXRReader> textureReader( std::make_shared<EXRReader>( textureFilename.c_str() ) );
         const float                textureScale = 4.f;
+        printf("DEMANDTEXTURE::EXR Loaded\n");
 #else
         // If OpenEXR is not available, use a procedurally generated image.
         std::shared_ptr<CheckerBoardReader> textureReader( std::make_shared<CheckerBoardReader>( 1024, 1024 ) );
         const float                      textureScale = 1.f;
+        printf("DEMANDTEXTURE::Checkerboard Loaded.\n");
 #endif
         const DemandTexture& texture = textureManager.createTexture( textureReader );
 
         // :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: //
 
+        printf("Texture Scale: %.3f.\n", textureScale);
+        printf("Texture ID: %d.\n", texture.getId());
 
 
         state.sbt.hitgroupRecordBase            = d_hitgroup_records;
@@ -1028,6 +1032,17 @@ void updateState( sutil::CUDAOutputBuffer<uchar4>& output_buffer, WhittedState &
 void launchSubframe( sutil::CUDAOutputBuffer<uchar4>& output_buffer, WhittedState& state )
 {
 
+
+    // :::::::::::::::::::::::::::::::  Multi-Camera ::::::::::::::::::::::::::::::::: //
+
+
+    // Sync demand-texture sampler array to the device and provide it as a launch parameter.
+    // textureManager.launchPrepare();
+    // state.params.demandTextures = textureManager.getSamplers();
+
+
+    // ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: //
+
     // Launch
     uchar4* result_buffer_data = output_buffer.map();
     state.params.frame_buffer = result_buffer_data;
@@ -1055,6 +1070,7 @@ void launchSubframe( sutil::CUDAOutputBuffer<uchar4>& output_buffer, WhittedStat
 
     // :::::::::::::::::::::::::::::::  Multi-Camera ::::::::::::::::::::::::::::::::: //
 
+    CUDA_SYNC_CHECK();
 
     // Repeatedly process any texture requests and relaunch until done.
     for( int numFilled = textureManager.processRequests(); numFilled > 0; numFilled = textureManager.processRequests() )
@@ -1085,7 +1101,7 @@ void launchSubframe( sutil::CUDAOutputBuffer<uchar4>& output_buffer, WhittedStat
     }
 
     output_buffer.unmap();
-    
+
     // ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: //
 
 }

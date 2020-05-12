@@ -31,6 +31,7 @@
 #include "optixMultiCamera.h"
 #include "random.h"
 #include "helpers.h"
+#include <stdio.h>
 
 extern "C" {
 __constant__ Params params;
@@ -62,8 +63,10 @@ extern "C" __global__ void __raygen__pinhole_camera()
     const DemandTextureSampler& sampler = params.demandTextures[0];
     float4 texColor = tex2D<float4>( 
         sampler.texture, 
-        idx.x / params.width, 
-        idx.y / params.height );
+        4.f * idx.x / params.width, 
+        4.f * idx.y / params.height );
+
+    // printf("u,v: %d,%d \ttexu,v: %.3f,%.3f\n", idx.x, idx.y, texColor.x, texColor.y);
     
     /*
     float2 d = make_float2(idx.x, idx.y) /
