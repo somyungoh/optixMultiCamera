@@ -27,14 +27,16 @@
 //
 
 
-#include <DemandTexture.h>
-#include <optixPaging/optixPaging.h>
+// #include <DemandTexture.h>
+// #include <optixPaging/optixPaging.h>
 
 #include <stdint.h>
 #include <vector_types.h>
 #include <optix_types.h>
 #include <sutil/vec_math.h>
-#include <DemandTextureManager.h>
+
+
+// #include <DemandTextureManager.h>
 
 enum RayType
 {
@@ -48,6 +50,13 @@ struct BasicLight
 {
     float3  pos;
     float3  color;
+};
+
+struct Texture {
+
+    uint32_t width;
+    uint32_t height;
+    cudaTextureObject_t texture;    
 };
 
 
@@ -66,7 +75,9 @@ struct Params
 
     OptixTraversableHandle  handle;
 
-    const DemandTextureSampler* demandTextures;
+    // camera texture
+    Texture cam_texture;
+    // const DemandTextureSampler* demandTextures;
 };
 
 

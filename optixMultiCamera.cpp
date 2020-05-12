@@ -52,11 +52,14 @@
 
 #include "optixMultiCamera.h"
 
-#ifdef OPTIX_SAMPLE_USE_OPEN_EXR
-#include <lib/DemandLoading/EXRReader.h>
-#else
-#include <lib/DemandLoading/CheckerBoardReader.h>
-#endif
+
+#include <sutil/PPMLoader.h>
+
+// #ifdef OPTIX_SAMPLE_USE_OPEN_EXR
+// #include <lib/DemandLoading/EXRReader.h>
+// #else
+// #include <lib/DemandLoading/CheckerBoardReader.h>
+// #endif
 
 //------------------------------------------------------------------------------
 //
@@ -74,8 +77,7 @@ sutil::Trackball  trackball;
 // ::::::::::::::::: Multi - Camera :::::::::::::::::: //
 
 // texture manager
-DemandTextureManager       textureManager;
-
+// DemandTextureManager       textureManager;
 // ::::::::::::::::::::::::::::::::::::::::::::::::::: //
 
 
@@ -272,10 +274,19 @@ void initLaunchParams( WhittedState& state )
 
     // :::::::::::::::::::::::::::::::  Multi-Camera ::::::::::::::::::::::::::::::::: //
 
+    
+    PPMLoader ppmloader (sutil::sampleDataFilePath( "PPM/stop01.ppm" ));
+    cudaTextureDesc tex_desc;
 
-    // Sync demand-texture sampler array to the device and provide it as a launch parameter.
-    textureManager.launchPrepare();
-    state.params.demandTextures = textureManager.getSamplers();
+    // cuda-context texture object
+    cudaTextureObject_t cuda_tex = ppmloader.loadTexture(make_float3(0,0,0), &tex_desc);
+    
+    Texture texture;
+    texture.texture = cuda_tex;
+    texture.width  = ppmloader.width();
+    texture.height = ppmloader.height();
+    
+    state.params.cam_texture = texture;
 
 
     // ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: //
@@ -913,36 +924,6 @@ void createSBT( WhittedState &state )
             cudaMemcpyHostToDevice
         ) );
 
-
-
-        // :::::::::::::::::::::::::::::::  Multi-Camera ::::::::::::::::::::::::::::::::: //
-
-        // Initialize DemandTextureManager and create a demand-loaded texture.
-        // The texture id is passed to the closest hit shader via a hit group record in the SBT.
-        // The texture sampler array (indexed by texture id) is passed as a launch parameter.
-        //
-#ifdef OPTIX_SAMPLE_USE_OPEN_EXR
-        // Image credit: CC0Textures.com (https://cc0textures.com/view.php?tex=Bricks12)
-        // Licensed under the Creative Commons CC0 License.
-	std::string textureFilename( sutil::sampleDataFilePath( "Textures/Bricks12_col.exr" ) );
-
-        std::shared_ptr<EXRReader> textureReader( std::make_shared<EXRReader>( textureFilename.c_str() ) );
-        const float                textureScale = 4.f;
-        printf("DEMANDTEXTURE::EXR Loaded\n");
-#else
-        // If OpenEXR is not available, use a procedurally generated image.
-        std::shared_ptr<CheckerBoardReader> textureReader( std::make_shared<CheckerBoardReader>( 1024, 1024 ) );
-        const float                      textureScale = 1.f;
-        printf("DEMANDTEXTURE::Checkerboard Loaded.\n");
-#endif
-        const DemandTexture& texture = textureManager.createTexture( textureReader );
-
-        // :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: //
-
-        printf("Texture Scale: %.3f.\n", textureScale);
-        printf("Texture ID: %d.\n", texture.getId());
-
-
         state.sbt.hitgroupRecordBase            = d_hitgroup_records;
         state.sbt.hitgroupRecordCount           = count_records;
         state.sbt.hitgroupRecordStrideInBytes   = static_cast<uint32_t>( sizeof_hitgroup_record );
@@ -1031,18 +1012,6 @@ void updateState( sutil::CUDAOutputBuffer<uchar4>& output_buffer, WhittedState &
 
 void launchSubframe( sutil::CUDAOutputBuffer<uchar4>& output_buffer, WhittedState& state )
 {
-
-
-    // :::::::::::::::::::::::::::::::  Multi-Camera ::::::::::::::::::::::::::::::::: //
-
-
-    // Sync demand-texture sampler array to the device and provide it as a launch parameter.
-    // textureManager.launchPrepare();
-    // state.params.demandTextures = textureManager.getSamplers();
-
-
-    // ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: //
-
     // Launch
     uchar4* result_buffer_data = output_buffer.map();
     state.params.frame_buffer = result_buffer_data;
@@ -1064,45 +1033,8 @@ void launchSubframe( sutil::CUDAOutputBuffer<uchar4>& output_buffer, WhittedStat
         1                    // launch depth
     ) );
 
-    // output_buffer.unmap();
-    // CUDA_SYNC_CHECK();
-
-
-    // :::::::::::::::::::::::::::::::  Multi-Camera ::::::::::::::::::::::::::::::::: //
-
-    CUDA_SYNC_CHECK();
-
-    // Repeatedly process any texture requests and relaunch until done.
-    for( int numFilled = textureManager.processRequests(); numFilled > 0; numFilled = textureManager.processRequests() )
-    {
-        std::cout << "Filled " << numFilled << " requests.  Relaunching..." << std::endl;
-
-        // Sync sampler array and update launch parameter if it grew.
-        textureManager.launchPrepare();
-        if( state.params.demandTextures != textureManager.getSamplers() )
-        {
-            state.params.demandTextures = textureManager.getSamplers();
-            CUDA_CHECK( cudaMemcpy( reinterpret_cast<void*>( state.d_params ), &state.params, sizeof( state.params ), cudaMemcpyHostToDevice ) );
-        }
-
-        // Relaunch
-        OPTIX_CHECK( optixLaunch( 
-            state.pipeline, 
-            state.stream, 
-            reinterpret_cast<CUdeviceptr>( state.d_params ), 
-            sizeof( Params ), 
-            &state.sbt, 
-            state.params.width, 
-            state.params.height, 
-            1 
-        ) );/*depth=*/
-        // output_buffer.unmap();
-        CUDA_SYNC_CHECK();
-    }
-
     output_buffer.unmap();
-
-    // ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: //
+    CUDA_SYNC_CHECK();
 
 }
 

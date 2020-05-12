@@ -56,32 +56,24 @@ extern "C" __global__ void __raygen__pinhole_camera()
     float3 ray_origin = camera->eye;
     float3 ray_direction = normalize(d.x*camera->U + d.y*camera->V + camera->W);
 
-    // :::::::::::::::  Multi-Camera :::::::::::::::: //
 
-    // load texture data from the sampler
-    // NOTE: It's supposed to be a list of textures but here I only have 1 texture loaded (index = 0)
-    const DemandTextureSampler& sampler = params.demandTextures[0];
-    float4 texColor = tex2D<float4>( 
-        sampler.texture, 
-        4.f * idx.x / params.width, 
-        4.f * idx.y / params.height );
+    // :::::::::::::::::::::::  Multi-Camera :::::::::::::::::::::::: //
 
-    // printf("u,v: %d,%d \ttexu,v: %.3f,%.3f\n", idx.x, idx.y, texColor.x, texColor.y);
+    // Camera Painting
     
-    /*
-    float2 d = make_float2(idx.x, idx.y) /
-		make_float2(params.width, params.height) *
-		make_float2(2.0f * M_PIf , M_PIf) +
-		make_float2(M_PIf, 0);
+    int4 tex_c = tex2D<int4>(
+        params.cam_texture.texture, 
+        params.cam_texture.width  * (float)idx.x / params.width, 
+        params.cam_texture.height * (float)idx.y / params.height);
+    
+    float3 ray_c = normalize(make_float3(tex_c.x, tex_c.y, tex_c.z));
+    ray_direction = normalize(
+        (d.x + ray_c.x * 0.5) * camera->U + 
+        (d.y + ray_c.y * 0.5) * camera->V + 
+        camera->W);
 
-    float3 angle = make_float3( cos(d.x) * sin(d.y),
-				-cos(d.y),
-				sin(d.x) * sin(d.y));
-    */
+    // ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: //
 
-    //float3 ray_direction = normalize(angle.x*camera->U + angle.y*camera->V + angle.z*camera->W);
-
-    // ::::::::::::::::::::::::::::::::::::::::::::::: //
 
     RadiancePRD prd;
     prd.importance = 1.f;
