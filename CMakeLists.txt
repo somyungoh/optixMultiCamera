@@ -26,14 +26,14 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-# set( OPTIX_PAGING "${OptiX_INCLUDE}/optixPaging" )
-# set( EXP_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../lib" )
-# include_directories(
-#   .
-#   "${CMAKE_CURRENT_SOURCE_DIR}"
-#   "${EXP_LIB_DIR}"
-#   "${OPTIX_PAGING}"
-# )
+set( OPTIX_PAGING "${OptiX_INCLUDE}/optixPaging" )
+set( EXP_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../lib" )
+include_directories(
+  .
+  "${CMAKE_CURRENT_SOURCE_DIR}"
+  "${EXP_LIB_DIR}"
+  "${OPTIX_PAGING}"
+)
 
 # These CUDA files need to be compiled as OBJ, not as PTX
 # set_source_files_properties( ${OPTIX_PAGING}/optixPaging.cu PROPERTIES CUDA_SOURCE_PROPERTY_FORMAT OBJ )
@@ -41,6 +41,12 @@
 # This file is just for reference in the IDE, don't compile it.
 # set_source_files_properties( ${OPTIX_PAGING}/optixPagingImpl.cpp PROPERTIES HEADER_FILE_ONLY TRUE )
 
+# imgui librraries
+include_directories(
+  .
+  "${CMAKE_CURRENT_SOURCE_DIR}"
+  "${EXP_LIB_DIR}"
+)
 
 OPTIX_add_sample_executable( optixMultiCamera target_name
   optixMultiCamera.cpp
@@ -55,9 +61,15 @@ OPTIX_add_sample_executable( optixMultiCamera target_name
   camera.cu
   geometry.cu
   shading.cu
+  
+  # ${EXP_LIB_DIR}/imgui/imgui.h
+  # ${EXP_LIB_DIR}/imgui/imgui.cpp
+  # ${EXP_LIB_DIR}/imgui/imgui_impl_glfw.h
+  # ${EXP_LIB_DIR}/imgui/imgui_impl_opengl2.h
+  # ${EXP_LIB_DIR}/imgui/imgui_impl_glfw.cpp
+  # ${EXP_LIB_DIR}/imgui/imgui_impl_opengl2.cpp
 
   OPTIONS -rdc true
-
 
   # ${EXP_LIB_DIR}/DemandLoading/ImageReader.h
   # ${EXP_LIB_DIR}/DemandLoading/CheckerBoardReader.h

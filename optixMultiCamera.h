@@ -27,16 +27,11 @@
 //
 
 
-// #include <DemandTexture.h>
-// #include <optixPaging/optixPaging.h>
 
 #include <stdint.h>
 #include <vector_types.h>
 #include <optix_types.h>
 #include <sutil/vec_math.h>
-
-
-// #include <DemandTextureManager.h>
 
 enum RayType
 {
@@ -77,7 +72,12 @@ struct Params
 
     // camera texture
     Texture cam_texture;
-    // const DemandTextureSampler* demandTextures;
+    float   camTex_strength;
+
+    // flags
+    bool isCameraPaint;
+    bool isCubistRender;
+    // TODO: Add cubist strength
 };
 
 

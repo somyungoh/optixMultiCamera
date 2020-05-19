@@ -103,6 +103,45 @@ traceRadianceRay(
     return prd.result;
 }
 
+
+// :::::::::::::::::::::::::::::::  Multi-Camera ::::::::::::::::::::::::::::::::: //
+
+// second render pass for cubist rendering.
+static __device__ __inline__ float3
+traceCubistRay(
+    float3 origin,
+    float3 direction,
+    int depth,
+    float importance)
+{
+    RadiancePRD prd;
+    prd.depth = depth;
+    prd.importance = importance;
+
+    optixTrace(
+        params.handle,
+        origin,
+        direction,
+        params.scene_epsilon,
+        1e16f,
+        0.0f,
+        OptixVisibilityMask( 1 ),
+        OPTIX_RAY_FLAG_NONE,
+        RAY_TYPE_RADIANCE,
+        RAY_TYPE_COUNT,
+        RAY_TYPE_RADIANCE,
+        float3_as_args(prd.result),
+        /* Can't use float_as_int() because it returns rvalue but payload requires a lvalue */
+        reinterpret_cast<uint32_t&>(prd.importance),
+        reinterpret_cast<uint32_t&>(prd.depth) );
+
+    return prd.result;
+}
+
+
+// ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: //
+
+
 static
 __device__ void phongShadowed()
 {
@@ -243,7 +282,42 @@ extern "C" __global__ void __closesthit__checker_radiance()
         int_as_float( optixGetAttribute_2() ));
     float3 world_normal = normalize( optixTransformNormalFromObjectToWorldSpace(object_normal) );
     float3 ffnormal  = faceforward( world_normal, -optixGetWorldRayDirection(), world_normal );
-    phongShade( Kd, Ka, Ks, Kr, phong_exp, ffnormal );
+
+
+    // :::::::::::::::::::::::::::::::  Multi-Camera ::::::::::::::::::::::::::::::::: //
+    
+    RadiancePRD prd = getRadiancePRD();
+
+    // send cubist ray if initial hit
+    if ( prd.depth == 0  && params.isCubistRender ) {
+            
+        const float3 ray_orig = optixGetWorldRayOrigin();
+        const float3 ray_dir  = optixGetWorldRayDirection();
+        const float  ray_t    = optixGetRayTmax();
+        
+        float3   new_raydir = normalize (ray_dir + Kd * 0.2);
+        uint32_t new_depth  = prd.depth + 1;
+        
+        float3 result = traceCubistRay (
+            ray_orig,
+            new_raydir,
+            new_depth,
+            prd.importance
+        );
+        
+        // pass the color back
+        prd.result = result;
+        setRadiancePRD(prd);
+    }
+    else
+        phongShade( Kd, Ka, Ks, Kr, phong_exp, ffnormal );
+    
+
+    // :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: //
+
+
+
+    //phongShade( Kd, Ka, Ks, Kr, phong_exp, ffnormal );
 }
 
 extern "C" __global__ void __closesthit__metal_radiance()
@@ -258,7 +332,39 @@ extern "C" __global__ void __closesthit__metal_radiance()
 
     float3 world_normal = normalize( optixTransformNormalFromObjectToWorldSpace( object_normal ) );
     float3 ffnormal = faceforward( world_normal, -optixGetWorldRayDirection(), world_normal );
-    phongShade( phong.Kd, phong.Ka, phong.Ks, phong.Kr, phong.phong_exp, ffnormal );
+
+    // :::::::::::::::::::::::::::::::  Multi-Camera ::::::::::::::::::::::::::::::::: //
+    
+    RadiancePRD prd = getRadiancePRD();
+
+    // send cubist ray if initial hit
+    if ( prd.depth == 0  && params.isCubistRender ) {
+            
+        const float3 ray_orig = optixGetWorldRayOrigin();
+        const float3 ray_dir  = optixGetWorldRayDirection();
+        const float  ray_t    = optixGetRayTmax();
+        
+        float3   new_raydir = normalize (ray_dir + phong.Kd * 0.2);
+        uint32_t new_depth  = prd.depth + 1;
+        
+        float3 result = traceCubistRay (
+            ray_orig,
+            new_raydir,
+            new_depth,
+            prd.importance
+        );
+        
+        // pass the color back
+        prd.result = result;
+        setRadiancePRD(prd);
+    }
+    else
+        phongShade( phong.Kd, phong.Ka, phong.Ks, phong.Kr, phong.phong_exp, ffnormal );
+    
+
+    // :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: //
+
+    //phongShade( phong.Kd, phong.Ka, phong.Ks, phong.Kr, phong.phong_exp, ffnormal );
 }
 
 extern "C" __global__ void __anyhit__full_occlusion()
@@ -290,6 +396,7 @@ extern "C" __global__ void __closesthit__glass_radiance()
     float3 hit_point = ray_orig + ray_t * ray_dir;
     SphereShellHitType hit_type = (SphereShellHitType) optixGetHitKind();
     float3 front_hit_point = hit_point, back_hit_point = hit_point;
+
 
     if (hit_type & HIT_OUTSIDE_FROM_OUTSIDE || hit_type & HIT_INSIDE_FROM_INSIDE)
     {

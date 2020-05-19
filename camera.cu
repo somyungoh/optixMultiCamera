@@ -33,6 +33,9 @@
 #include "helpers.h"
 #include <stdio.h>
 
+// toogle camera painting
+
+
 extern "C" {
 __constant__ Params params;
 }
@@ -60,18 +63,19 @@ extern "C" __global__ void __raygen__pinhole_camera()
     // :::::::::::::::::::::::  Multi-Camera :::::::::::::::::::::::: //
 
     // Camera Painting
+    if ( params.isCameraPaint ) {
+        int4 tex_c = tex2D<int4>(
+            params.cam_texture.texture, 
+            params.cam_texture.width  * (float)idx.x / params.width, 
+            params.cam_texture.height * (float)idx.y / params.height);
+        
+        float2 ray_c = normalize(make_float2(tex_c.x, tex_c.y));
+        ray_direction = normalize(
+            (d.x + ray_c.x * params.camTex_strength) * camera->U + 
+            (d.y + ray_c.y * params.camTex_strength) * camera->V + 
+            camera->W);
+    }
     
-    int4 tex_c = tex2D<int4>(
-        params.cam_texture.texture, 
-        params.cam_texture.width  * (float)idx.x / params.width, 
-        params.cam_texture.height * (float)idx.y / params.height);
-    
-    float3 ray_c = normalize(make_float3(tex_c.x, tex_c.y, tex_c.z));
-    ray_direction = normalize(
-        (d.x + ray_c.x * 0.5) * camera->U + 
-        (d.y + ray_c.y * 0.5) * camera->V + 
-        camera->W);
-
     // ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: //
 
 
