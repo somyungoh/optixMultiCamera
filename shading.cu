@@ -333,6 +333,7 @@ extern "C" __global__ void __closesthit__metal_radiance()
     float3 world_normal = normalize( optixTransformNormalFromObjectToWorldSpace( object_normal ) );
     float3 ffnormal = faceforward( world_normal, -optixGetWorldRayDirection(), world_normal );
 
+    
     // :::::::::::::::::::::::::::::::  Multi-Camera ::::::::::::::::::::::::::::::::: //
     
     RadiancePRD prd = getRadiancePRD();
