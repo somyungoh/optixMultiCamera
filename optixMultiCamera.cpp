@@ -47,11 +47,6 @@
 #include <sutil/vec_math.h>
 
 
-// #include <imgui/imgui.h>
-// #include <imgui/imgui_impl_glfw.h>
-// #include <imgui/imgui_impl_opengl2.h>
-
-
 #include <GLFW/glfw3.h>
 #include <iomanip>
 #include <cstring>
@@ -62,12 +57,6 @@
 #include <sutil/PPMLoader.h>
 
 
-
-// #ifdef OPTIX_SAMPLE_USE_OPEN_EXR
-// #include <lib/DemandLoading/EXRReader.h>
-// #else
-// #include <lib/DemandLoading/CheckerBoardReader.h>
-// #endif
 
 //------------------------------------------------------------------------------
 //
@@ -1191,21 +1180,6 @@ int main( int argc, char* argv[] )
             glfwSetWindowUserPointer  ( window, &state.params       );
 
 
-            // // Setup Dear ImGui context
-            // IMGUI_CHECKVERSION();
-            // ImGui::CreateContext();
-            // ImGuiIO& io = ImGui::GetIO(); (void)io;
-            // //io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
-            // //io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
-
-            // // Setup Dear ImGui style
-            // ImGui::StyleColorsDark();
-            // //ImGui::StyleColorsClassic();
-
-            // // Setup Platform/Renderer bindings
-            // ImGui_ImplGlfw_InitForOpenGL(window, true);
-            // ImGui_ImplOpenGL2_Init();
-
             {
                 // output_buffer needs to be destroyed before cleanupUI is called
                 sutil::CUDAOutputBuffer<uchar4> output_buffer(
@@ -1242,39 +1216,6 @@ int main( int argc, char* argv[] )
                     display_time += t1 - t0;
 
                     sutil::displayStats( state_update_time, render_time, display_time );
-
-                    // // Start the Dear ImGui frame
-                    // ImGui_ImplOpenGL2_NewFrame();
-                    // ImGui_ImplGlfw_NewFrame();
-                    // ImGui::NewFrame();
-                    // // 2. Show a simple window that we create ourselves. We use a Begin/End pair to created a named window.
-                    // {
-                    //     static int counter = 0;
-
-                    //     imgui_hoverGui = io.WantCaptureMouse; // ImGui::IsMouseHoveringAnyWindow();
-
-                    //     ImGui::Begin("Hello, world!");                          // Create a window called "Hello, world!" and append into it.
-
-                    //     // ImGui::Text("This is some useful text.");               // Display some text (you can use a format strings too)
-                    //     // ImGui::Checkbox("Demo Window", &show_demo_window);      // Edit bools storing our window open/close state
-                    //     // ImGui::Checkbox("Another Window", &show_another_window);
-                    //     // ImGui::Checkbox("Hovered", &hover);
-
-                    //     ImGui::SliderFloat("float", &imgui_camtexstr, 0.0f, 1.0f);    // Edit 1 float using a slider from 0.0f to 1.0f
-
-                    //     // if (ImGui::Button("Button"))                            // Buttons return true when clicked (most widgets return true when edited/activated)
-                    //     //     counter++;
-                    //     // ImGui::SameLine();
-                    //     // ImGui::Text("counter = %d", counter);
-
-                    //     // ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
-                    //     ImGui::End();
-
-                    // }
-
-                    // // Rendering
-                    // ImGui::Render();
-                    // ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
 
                     glfwSwapBuffers( window );
 
