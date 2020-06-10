@@ -37,32 +37,32 @@
 
 #include <sampleConfig.h>
 
+#include <cuda/cubistShading.h>
+//#include <cuda/whitted.h>
+#include <cuda/Light.h>
+
 #include <sutil/Camera.h>
 #include <sutil/Trackball.h>
 #include <sutil/CUDAOutputBuffer.h>
 #include <sutil/Exception.h>
 #include <sutil/GLDisplay.h>
 #include <sutil/Matrix.h>
+#include <sutil/Scene.h>
 #include <sutil/sutil.h>
 #include <sutil/vec_math.h>
 
-
 #include <GLFW/glfw3.h>
-#include <iomanip>
+
+
+#include <array>
 #include <cstring>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <string>
 
-#include "optixMultiCamera.h"
-
-
-#include <sutil/PPMLoader.h>
-
-
-
-//------------------------------------------------------------------------------
-//
-// Globals
-//
-//------------------------------------------------------------------------------
+//#define USE_IAS // WAR for broken direct intersection of GAS on non-RTX cards
 
 bool              resize_dirty  = false;
 
@@ -71,99 +71,15 @@ bool              camera_changed = true;
 sutil::Camera     camera;
 sutil::Trackball  trackball;
 
-// ::::::::::::::::: Multi - Camera :::::::::::::::::: //
-
-// texture manager
-// DemandTextureManager       textureManager;
-// ::::::::::::::::::::::::::::::::::::::::::::::::::: //
-
-
 // Mouse state
 int32_t           mouse_button = -1;
 
-const int         max_trace = 10;
+int32_t           samples_per_launch = 16;
 
-//imgui state
-bool              imgui_hoverGui;
-float             imgui_camtexstr = 0.5;
-
-//------------------------------------------------------------------------------
-//
-// Local types
-// TODO: some of these should move to sutil or optix util header
-//
-//------------------------------------------------------------------------------
-
-template <typename T>
-struct Record
-{
-    __align__( OPTIX_SBT_RECORD_ALIGNMENT )
-
-    char header[OPTIX_SBT_RECORD_HEADER_SIZE];
-    T data;
-};
-
-typedef Record<CameraData>      RayGenRecord;
-typedef Record<MissData>        MissRecord;
-typedef Record<HitGroupData>    HitGroupRecord;
-
-const uint32_t OBJ_COUNT = 3;
-
-struct WhittedState
-{
-    OptixDeviceContext          context                   = 0;
-    OptixTraversableHandle      gas_handle                = {};
-    CUdeviceptr                 d_gas_output_buffer       = {};
-
-    OptixModule                 geometry_module           = 0;
-    OptixModule                 camera_module             = 0;
-    OptixModule                 shading_module            = 0;
-
-    OptixProgramGroup           raygen_prog_group         = 0;
-    OptixProgramGroup           radiance_miss_prog_group  = 0;
-    OptixProgramGroup           occlusion_miss_prog_group = 0;
-    OptixProgramGroup           radiance_glass_sphere_prog_group  = 0;
-    OptixProgramGroup           occlusion_glass_sphere_prog_group = 0;
-    OptixProgramGroup           radiance_metal_sphere_prog_group  = 0;
-    OptixProgramGroup           occlusion_metal_sphere_prog_group = 0;
-    OptixProgramGroup           radiance_floor_prog_group         = 0;
-    OptixProgramGroup           occlusion_floor_prog_group        = 0;
-
-    OptixPipeline               pipeline                  = 0;
-    OptixPipelineCompileOptions pipeline_compile_options  = {};
-
-    CUstream                    stream                    = 0;
-    Params                      params;
-    Params*                     d_params                  = nullptr;
-
-    OptixShaderBindingTable     sbt                       = {};
-};
-
-//------------------------------------------------------------------------------
-//
-//  Geometry and Camera data
-//
-//------------------------------------------------------------------------------
-
-// Metal sphere, glass sphere, floor, light
-const Sphere g_sphere = {
-    { 2.0f, 1.5f, -2.5f }, // center
-    1.0f                   // radius
-};
-const SphereShell g_sphere_shell = {
-    { 4.0f, 2.3f, -4.0f }, // center
-    0.96f,                 // radius1
-    1.0f                   // radius2
-};
-const Parallelogram g_floor(
-    make_float3( 32.0f, 0.0f, 0.0f ),    // v1
-    make_float3( 0.0f, 0.0f, 16.0f ),    // v2
-    make_float3( -16.0f, 0.01f, -8.0f )  // anchor
-    );
-const BasicLight g_light = {
-    make_float3( 60.0f, 40.0f, 0.0f ),   // pos
-    make_float3( 1.0f, 1.0f, 1.0f )      // color
-};
+whitted::LaunchParams*  d_params = nullptr;
+whitted::LaunchParams   params   = {};
+int32_t                 width    = 768;
+int32_t                 height   = 768;
 
 //------------------------------------------------------------------------------
 //
@@ -173,20 +89,8 @@ const BasicLight g_light = {
 
 static void mouseButtonCallback( GLFWwindow* window, int button, int action, int mods )
 {
-
     double xpos, ypos;
     glfwGetCursorPos( window, &xpos, &ypos );
-
-    // :::::::::::::::::::::::::::::::  Multi-Camera ::::::::::::::::::::::::::::::::: //
-
-    // only update imgui when hovered
-    if(imgui_hoverGui) {
-        Params* params = static_cast<Params*>( glfwGetWindowUserPointer( window ) );
-        params->camTex_strength = imgui_camtexstr;
-        return;
-    }
-
-    // ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: //
 
     if( action == GLFW_PRESS )
     {
@@ -202,18 +106,16 @@ static void mouseButtonCallback( GLFWwindow* window, int button, int action, int
 
 static void cursorPosCallback( GLFWwindow* window, double xpos, double ypos )
 {
-    Params* params = static_cast<Params*>( glfwGetWindowUserPointer( window ) );
-
     if( mouse_button == GLFW_MOUSE_BUTTON_LEFT )
     {
         trackball.setViewMode( sutil::Trackball::LookAtFixed );
-        trackball.updateTracking( static_cast<int>( xpos ), static_cast<int>( ypos ), params->width, params->height );
+        trackball.updateTracking( static_cast<int>( xpos ), static_cast<int>( ypos ), width, height );
         camera_changed = true;
     }
     else if( mouse_button == GLFW_MOUSE_BUTTON_RIGHT )
     {
         trackball.setViewMode( sutil::Trackball::EyeFixed );
-        trackball.updateTracking( static_cast<int>( xpos ), static_cast<int>( ypos ), params->width, params->height );
+        trackball.updateTracking( static_cast<int>( xpos ), static_cast<int>( ypos ), width, height );
         camera_changed = true;
     }
 }
@@ -221,9 +123,8 @@ static void cursorPosCallback( GLFWwindow* window, double xpos, double ypos )
 
 static void windowSizeCallback( GLFWwindow* window, int32_t res_x, int32_t res_y )
 {
-    Params* params = static_cast<Params*>( glfwGetWindowUserPointer( window ) );
-    params->width  = res_x;
-    params->height = res_y;
+    width   = res_x;
+    height  = res_y;
     camera_changed = true;
     resize_dirty   = true;
 }
@@ -233,27 +134,10 @@ static void keyCallback( GLFWwindow* window, int32_t key, int32_t /*scancode*/, 
 {
     if( action == GLFW_PRESS )
     {
-        Params* params = static_cast<Params*>( glfwGetWindowUserPointer( window ) );
-
-        if( // key == GLFW_KEY_Q ||
+        if( key == GLFW_KEY_Q ||
             key == GLFW_KEY_ESCAPE )
         {
             glfwSetWindowShouldClose( window, true );
-        }
-        else if ( key == GLFW_KEY_UP ) {
-            imgui_camtexstr += 0.05;
-            params->camTex_strength = imgui_camtexstr; 
-        }
-        else if ( key == GLFW_KEY_DOWN ) {
-            imgui_camtexstr -= 0.05;
-            if( imgui_camtexstr < 0 ) imgui_camtexstr = 0.0f;
-            params->camTex_strength = imgui_camtexstr;
-        }
-        else if ( key == GLFW_KEY_C ) {
-            params->isCameraPaint = !params->isCameraPaint;
-        }
-        else if ( key == GLFW_KEY_Q ) {
-            params->isCubistRender = !params->isCubistRender;
         }
     }
     else if( key == GLFW_KEY_G )
@@ -272,7 +156,8 @@ static void scrollCallback( GLFWwindow* window, double xscroll, double yscroll )
 
 //------------------------------------------------------------------------------
 //
-//  Helper functions
+// Helper functions
+// TODO: some of these should move to sutil or optix util header
 //
 //------------------------------------------------------------------------------
 
@@ -282,719 +167,153 @@ void printUsageAndExit( const char* argv0 )
     std::cerr <<  "Options: --file | -f <filename>      File for image output\n";
     std::cerr <<  "         --launch-samples | -s       Number of samples per pixel per launch (default 16)\n";
     std::cerr <<  "         --no-gl-interop             Disable GL interop for display\n";
+    std::cerr <<  "         --model <model.gltf>        Specify model to render (required)\n";
     std::cerr <<  "         --help | -h                 Print this usage message\n";
     exit( 0 );
 }
 
-void initLaunchParams( WhittedState& state )
-{
+
+void initLaunchParams( const sutil::Scene& scene ) {
     CUDA_CHECK( cudaMalloc(
-        reinterpret_cast<void**>( &state.params.accum_buffer ),
-        state.params.width*state.params.height*sizeof(float4)
-    ) );
-    state.params.frame_buffer = nullptr; // Will be set when output buffer is mapped
-
-    state.params.subframe_index = 0u;
-
-    state.params.light = g_light;
-    state.params.ambient_light_color = make_float3( 0.4f, 0.4f, 0.4f );
-    state.params.max_depth = max_trace;
-    state.params.scene_epsilon = 1.e-4f;
-
-
-    // :::::::::::::::::::::::::::::::  Multi-Camera ::::::::::::::::::::::::::::::::: //
-
-    // load PPM image
-    PPMLoader ppmloader (sutil::sampleDataFilePath( "PPM/hair.ppm" ));
-    cudaTextureDesc tex_desc;
-
-    // cuda-context texture object
-    cudaTextureObject_t cuda_tex = ppmloader.loadTexture(make_float3(0,0,0), &tex_desc);
-    
-    Texture texture;
-    texture.texture              = cuda_tex;
-    texture.width                = ppmloader.width();
-    texture.height               = ppmloader.height();
-    
-    state.params.cam_texture     = texture;
-    state.params.camTex_strength = imgui_camtexstr;
-
-    state.params.isCameraPaint   = true;
-    state.params.isCubistRender  = true;
-
-    // ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: //
-
-
-    CUDA_CHECK( cudaStreamCreate( &state.stream ) );
-    CUDA_CHECK( cudaMalloc( reinterpret_cast<void**>( &state.d_params ), sizeof( Params ) ) );
-
-    state.params.handle = state.gas_handle;
-}
-
-static void sphere_bound(float3 center, float radius, float result[6])
-{
-    OptixAabb *aabb = reinterpret_cast<OptixAabb*>(result);
-
-    float3 m_min = center - radius;
-    float3 m_max = center + radius;
-
-    *aabb = {
-        m_min.x, m_min.y, m_min.z,
-        m_max.x, m_max.y, m_max.z
-    };
-}
-
-static void parallelogram_bound(float3 v1, float3 v2, float3 anchor, float result[6])
-{
-    // v1 and v2 are scaled by 1./length^2.  Rescale back to normal for the bounds computation.
-    const float3 tv1  = v1 / dot( v1, v1 );
-    const float3 tv2  = v2 / dot( v2, v2 );
-    const float3 p00  = anchor;
-    const float3 p01  = anchor + tv1;
-    const float3 p10  = anchor + tv2;
-    const float3 p11  = anchor + tv1 + tv2;
-
-    OptixAabb* aabb = reinterpret_cast<OptixAabb*>(result);
-
-    float3 m_min = fminf( fminf( p00, p01 ), fminf( p10, p11 ));
-    float3 m_max = fmaxf( fmaxf( p00, p01 ), fmaxf( p10, p11 ));
-    *aabb = {
-        m_min.x, m_min.y, m_min.z,
-        m_max.x, m_max.y, m_max.z
-    };
-}
-
-static void buildGas(
-    const WhittedState &state,
-    const OptixAccelBuildOptions &accel_options,
-    const OptixBuildInput &build_input,
-    OptixTraversableHandle &gas_handle,
-    CUdeviceptr &d_gas_output_buffer
-    )
-{
-    OptixAccelBufferSizes gas_buffer_sizes;
-    CUdeviceptr d_temp_buffer_gas;
-
-    OPTIX_CHECK( optixAccelComputeMemoryUsage(
-        state.context,
-        &accel_options,
-        &build_input,
-        1,
-        &gas_buffer_sizes));
-
-    CUDA_CHECK( cudaMalloc(
-        reinterpret_cast<void**>( &d_temp_buffer_gas ),
-        gas_buffer_sizes.tempSizeInBytes));
-
-    // non-compacted output and size of compacted GAS
-    CUdeviceptr d_buffer_temp_output_gas_and_compacted_size;
-    size_t compactedSizeOffset = roundUp<size_t>( gas_buffer_sizes.outputSizeInBytes, 8ull );
-    CUDA_CHECK( cudaMalloc(
-                reinterpret_cast<void**>( &d_buffer_temp_output_gas_and_compacted_size ),
-                compactedSizeOffset + 8
+                reinterpret_cast<void**>( &params.accum_buffer ),
+                width*height*sizeof(float4)
                 ) );
+    params.frame_buffer = nullptr; // Will be set when output buffer is mapped
 
-    OptixAccelEmitDesc emitProperty = {};
-    emitProperty.type = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
-    emitProperty.result = (CUdeviceptr)((char*)d_buffer_temp_output_gas_and_compacted_size + compactedSizeOffset);
+    params.subframe_index = 0u;
 
-    OPTIX_CHECK( optixAccelBuild(
-        state.context,
-        0,
-        &accel_options,
-        &build_input,
-        1,
-        d_temp_buffer_gas,
-        gas_buffer_sizes.tempSizeInBytes,
-        d_buffer_temp_output_gas_and_compacted_size,
-        gas_buffer_sizes.outputSizeInBytes,
-        &gas_handle,
-        &emitProperty,
-        1) );
+    const float loffset = scene.aabb().maxExtent();
 
-    CUDA_CHECK( cudaFree( (void*)d_temp_buffer_gas ) );
+    // TODO: add light support to sutil::Scene
+    std::vector<Light::Point> lights(2);
+    lights[0].color     = { 1.0f, 1.0f, 0.8f };
+    lights[0].intensity = 5.0f;
+    lights[0].position  = scene.aabb().center() + make_float3( loffset );
+    lights[0].falloff   = Light::Falloff::QUADRATIC;
+    lights[1].color     = { 0.8f, 0.8f, 1.0f };
+    lights[1].intensity = 3.0f;
+    lights[1].position  = scene.aabb().center() + make_float3( -loffset, 0.5f*loffset, -0.5f*loffset  );
+    lights[1].falloff   = Light::Falloff::QUADRATIC;
 
-    size_t compacted_gas_size;
-    CUDA_CHECK( cudaMemcpy( &compacted_gas_size, (void*)emitProperty.result, sizeof(size_t), cudaMemcpyDeviceToHost ) );
-
-    if( compacted_gas_size < gas_buffer_sizes.outputSizeInBytes )
-    {
-        CUDA_CHECK( cudaMalloc( reinterpret_cast<void**>( &d_gas_output_buffer ), compacted_gas_size ) );
-
-        // use handle as input and output
-        OPTIX_CHECK( optixAccelCompact( state.context, 0, gas_handle, d_gas_output_buffer, compacted_gas_size, &gas_handle ) );
-
-        CUDA_CHECK( cudaFree( (void*)d_buffer_temp_output_gas_and_compacted_size ) );
-    }
-    else
-    {
-        d_gas_output_buffer = d_buffer_temp_output_gas_and_compacted_size;
-    }
-}
-
-void createGeomety( WhittedState &state )
-{
-    //
-    // Build Custom Primitives
-    //
-
-    // Load AABB into device memory
-    OptixAabb   aabb[OBJ_COUNT];
-    CUdeviceptr d_aabb;
-
-    sphere_bound(
-        g_sphere.center, g_sphere.radius,
-        reinterpret_cast<float*>(&aabb[0]));
-    sphere_bound(
-        g_sphere_shell.center, g_sphere_shell.radius2,
-        reinterpret_cast<float*>(&aabb[1]));
-    parallelogram_bound(
-        g_floor.v1, g_floor.v2, g_floor.anchor,
-        reinterpret_cast<float*>(&aabb[2]));
-
-    CUDA_CHECK( cudaMalloc( reinterpret_cast<void**>( &d_aabb
-        ), OBJ_COUNT * sizeof( OptixAabb ) ) );
+    params.lights.count  = static_cast<uint32_t>( lights.size() );
+    CUDA_CHECK( cudaMalloc(
+                reinterpret_cast<void**>( &params.lights.data ),
+                lights.size() * sizeof( Light::Point )
+                ) );
     CUDA_CHECK( cudaMemcpy(
-                reinterpret_cast<void*>( d_aabb ),
-                &aabb,
-                OBJ_COUNT * sizeof( OptixAabb ),
+                reinterpret_cast<void*>( params.lights.data ),
+                lights.data(),
+                lights.size() * sizeof( Light::Point ),
                 cudaMemcpyHostToDevice
                 ) );
 
-    // Setup AABB build input
-    uint32_t aabb_input_flags[] = {
-        /* flags for metal sphere */
-        OPTIX_GEOMETRY_FLAG_NONE,
-        /* flag for glass sphere */
-        OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL,
-        /* flag for floor */
-        OPTIX_GEOMETRY_FLAG_NONE,
-    };
-    /* TODO: This API cannot control flags for different ray type */
+    params.miss_color   = make_float3( 0.3f, 0.1f, 0.1f );
 
-    const uint32_t sbt_index[] = { 0, 1, 2 };
-    CUdeviceptr    d_sbt_index;
+    //CUDA_CHECK( cudaStreamCreate( &stream ) );
+    CUDA_CHECK( cudaMalloc( reinterpret_cast<void**>( &d_params ), sizeof( whitted::LaunchParams ) ) );
 
-    CUDA_CHECK( cudaMalloc( reinterpret_cast<void**>( &d_sbt_index ), sizeof(sbt_index) ) );
-    CUDA_CHECK( cudaMemcpy(
-        reinterpret_cast<void*>( d_sbt_index ),
-        sbt_index,
-        sizeof( sbt_index ),
-        cudaMemcpyHostToDevice ) );
-
-    OptixBuildInput aabb_input = {};
-    aabb_input.type = OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES;
-    aabb_input.aabbArray.aabbBuffers   = &d_aabb;
-    aabb_input.aabbArray.flags         = aabb_input_flags;
-    aabb_input.aabbArray.numSbtRecords = OBJ_COUNT;
-    aabb_input.aabbArray.numPrimitives = OBJ_COUNT;
-    aabb_input.aabbArray.sbtIndexOffsetBuffer         = d_sbt_index;
-    aabb_input.aabbArray.sbtIndexOffsetSizeInBytes    = sizeof( uint32_t );
-    aabb_input.aabbArray.primitiveIndexOffset         = 0;
-
-
-    OptixAccelBuildOptions accel_options = {
-        OPTIX_BUILD_FLAG_ALLOW_COMPACTION,  // buildFlags
-        OPTIX_BUILD_OPERATION_BUILD         // operation
-    };
-
-
-    buildGas(
-        state,
-        accel_options,
-        aabb_input,
-        state.gas_handle,
-        state.d_gas_output_buffer);
-
-    CUDA_CHECK( cudaFree( (void*)d_aabb) );
+    params.handle = scene.traversableHandle();
 }
 
-void createModules( WhittedState &state )
+
+void handleCameraUpdate( whitted::LaunchParams& params )
 {
-    OptixModuleCompileOptions module_compile_options = {
-        100,                                    // maxRegisterCount
-        OPTIX_COMPILE_OPTIMIZATION_DEFAULT,     // optLevel
-        OPTIX_COMPILE_DEBUG_LEVEL_LINEINFO      // debugLevel
-    };
-    char log[2048];
-    size_t sizeof_log = sizeof(log);
+    if( !camera_changed )
+        return;
+    camera_changed = false;
 
-    {
-        const std::string ptx = sutil::getPtxString( OPTIX_SAMPLE_NAME, "geometry.cu" );
-        OPTIX_CHECK_LOG( optixModuleCreateFromPTX(
-            state.context,
-            &module_compile_options,
-            &state.pipeline_compile_options,
-            ptx.c_str(),
-            ptx.size(),
-            log,
-            &sizeof_log,
-            &state.geometry_module ) );
-    }
+    camera.setAspectRatio( static_cast<float>( width ) / static_cast<float>( height ) );
+    params.eye = camera.eye();
+    camera.UVWFrame( params.U, params.V, params.W );
+    /*
+    std::cerr
+        << "Updating camera:\n"
+        << "\tU: " << params.U.x << ", " << params.U.y << ", " << params.U.z << std::endl
+        << "\tV: " << params.V.x << ", " << params.V.y << ", " << params.V.z << std::endl
+        << "\tW: " << params.W.x << ", " << params.W.y << ", " << params.W.z << std::endl;
+        */
 
-    {
-        const std::string ptx = sutil::getPtxString( OPTIX_SAMPLE_NAME, "camera.cu" );
-        OPTIX_CHECK_LOG( optixModuleCreateFromPTX(
-            state.context,
-            &module_compile_options,
-            &state.pipeline_compile_options,
-            ptx.c_str(),
-            ptx.size(),
-            log,
-            &sizeof_log,
-            &state.camera_module ) );
-    }
-
-    {
-        const std::string ptx = sutil::getPtxString( OPTIX_SAMPLE_NAME, "shading.cu" );
-        OPTIX_CHECK_LOG( optixModuleCreateFromPTX(
-            state.context,
-            &module_compile_options,
-            &state.pipeline_compile_options,
-            ptx.c_str(),
-            ptx.size(),
-            log,
-            &sizeof_log,
-            &state.shading_module ) );
-    }
 }
 
-static void createCameraProgram( WhittedState &state, std::vector<OptixProgramGroup> &program_groups )
+
+void handleResize( sutil::CUDAOutputBuffer<uchar4>& output_buffer )
 {
-    OptixProgramGroup           cam_prog_group;
-    OptixProgramGroupOptions    cam_prog_group_options = {};
-    OptixProgramGroupDesc       cam_prog_group_desc = {};
-    cam_prog_group_desc.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
-    cam_prog_group_desc.raygen.module = state.camera_module;
-    cam_prog_group_desc.raygen.entryFunctionName = "__raygen__pinhole_camera";
+    if( !resize_dirty )
+        return;
+    resize_dirty = false;
 
-    char    log[2048];
-    size_t  sizeof_log = sizeof( log );
-    OPTIX_CHECK_LOG( optixProgramGroupCreate(
-        state.context,
-        &cam_prog_group_desc,
-        1,
-        &cam_prog_group_options,
-        log,
-        &sizeof_log,
-        &cam_prog_group ) );
+    output_buffer.resize( width, height );
 
-    program_groups.push_back(cam_prog_group);
-    state.raygen_prog_group = cam_prog_group;
+    // Realloc accumulation buffer
+    CUDA_CHECK( cudaFree( reinterpret_cast<void*>( params.accum_buffer ) ) );
+    CUDA_CHECK( cudaMalloc(
+                reinterpret_cast<void**>( &params.accum_buffer ),
+                width*height*sizeof(float4)
+                ) );
 }
 
-static void createGlassSphereProgram( WhittedState &state, std::vector<OptixProgramGroup> &program_groups )
+
+void updateState( sutil::CUDAOutputBuffer<uchar4>& output_buffer, whitted::LaunchParams& params )
 {
-    OptixProgramGroup           radiance_sphere_prog_group;
-    OptixProgramGroupOptions    radiance_sphere_prog_group_options = {};
-    OptixProgramGroupDesc       radiance_sphere_prog_group_desc = {};
-    radiance_sphere_prog_group_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
-    radiance_sphere_prog_group_desc.hitgroup.moduleIS            = state.geometry_module;
-    radiance_sphere_prog_group_desc.hitgroup.entryFunctionNameIS = "__intersection__sphere_shell";
-    radiance_sphere_prog_group_desc.hitgroup.moduleCH            = state.shading_module;
-    radiance_sphere_prog_group_desc.hitgroup.entryFunctionNameCH = "__closesthit__glass_radiance";
-    radiance_sphere_prog_group_desc.hitgroup.moduleAH            = nullptr;
-    radiance_sphere_prog_group_desc.hitgroup.entryFunctionNameAH = nullptr;
+    // Update params on device
+    if( camera_changed || resize_dirty )
+        params.subframe_index = 0;
 
-    char    log[2048];
-    size_t  sizeof_log = sizeof( log );
-    OPTIX_CHECK_LOG( optixProgramGroupCreate(
-        state.context,
-        &radiance_sphere_prog_group_desc,
-        1,
-        &radiance_sphere_prog_group_options,
-        log,
-        &sizeof_log,
-        &radiance_sphere_prog_group ) );
-
-    program_groups.push_back(radiance_sphere_prog_group);
-    state.radiance_glass_sphere_prog_group = radiance_sphere_prog_group;
-
-    OptixProgramGroup           occlusion_sphere_prog_group;
-    OptixProgramGroupOptions    occlusion_sphere_prog_group_options = {};
-    OptixProgramGroupDesc       occlusion_sphere_prog_group_desc = {};
-    occlusion_sphere_prog_group_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
-    occlusion_sphere_prog_group_desc.hitgroup.moduleIS            = state.geometry_module;
-    occlusion_sphere_prog_group_desc.hitgroup.entryFunctionNameIS = "__intersection__sphere_shell";
-    occlusion_sphere_prog_group_desc.hitgroup.moduleCH            = nullptr;
-    occlusion_sphere_prog_group_desc.hitgroup.entryFunctionNameCH = nullptr;
-    occlusion_sphere_prog_group_desc.hitgroup.moduleAH            = state.shading_module;
-    occlusion_sphere_prog_group_desc.hitgroup.entryFunctionNameAH = "__anyhit__glass_occlusion";
-
-    OPTIX_CHECK_LOG( optixProgramGroupCreate(
-        state.context,
-        &occlusion_sphere_prog_group_desc,
-        1,
-        &occlusion_sphere_prog_group_options,
-        log,
-        &sizeof_log,
-        &occlusion_sphere_prog_group ) );
-
-    program_groups.push_back(occlusion_sphere_prog_group);
-    state.occlusion_glass_sphere_prog_group = occlusion_sphere_prog_group;
+    handleCameraUpdate( params );
+    handleResize( output_buffer );
 }
 
-static void createMetalSphereProgram( WhittedState &state, std::vector<OptixProgramGroup> &program_groups )
+
+void launchSubframe( sutil::CUDAOutputBuffer<uchar4>& output_buffer, const sutil::Scene& scene )
 {
-    OptixProgramGroup           radiance_sphere_prog_group;
-    OptixProgramGroupOptions    radiance_sphere_prog_group_options = {};
-    OptixProgramGroupDesc       radiance_sphere_prog_group_desc = {};
-    radiance_sphere_prog_group_desc.kind   = OPTIX_PROGRAM_GROUP_KIND_HITGROUP,
-        radiance_sphere_prog_group_desc.hitgroup.moduleIS           = state.geometry_module;
-    radiance_sphere_prog_group_desc.hitgroup.entryFunctionNameIS    = "__intersection__sphere";
-    radiance_sphere_prog_group_desc.hitgroup.moduleCH               = state.shading_module;
-    radiance_sphere_prog_group_desc.hitgroup.entryFunctionNameCH    = "__closesthit__metal_radiance";
-    radiance_sphere_prog_group_desc.hitgroup.moduleAH               = nullptr;
-    radiance_sphere_prog_group_desc.hitgroup.entryFunctionNameAH    = nullptr;
 
-    char    log[2048];
-    size_t  sizeof_log = sizeof( log );
-    OPTIX_CHECK_LOG( optixProgramGroupCreate(
-        state.context,
-        &radiance_sphere_prog_group_desc,
-        1,
-        &radiance_sphere_prog_group_options,
-        log,
-        &sizeof_log,
-        &radiance_sphere_prog_group ) );
+    // Launch
+    uchar4* result_buffer_data = output_buffer.map();
+    params.frame_buffer        = result_buffer_data;
+    CUDA_CHECK( cudaMemcpyAsync( reinterpret_cast<void*>( d_params ),
+                &params,
+                sizeof( whitted::LaunchParams ),
+                cudaMemcpyHostToDevice,
+                0 // stream
+                ) );
 
-    program_groups.push_back(radiance_sphere_prog_group);
-    state.radiance_metal_sphere_prog_group = radiance_sphere_prog_group;
-
-    OptixProgramGroup           occlusion_sphere_prog_group;
-    OptixProgramGroupOptions    occlusion_sphere_prog_group_options = {};
-    OptixProgramGroupDesc       occlusion_sphere_prog_group_desc = {};
-    occlusion_sphere_prog_group_desc.kind   = OPTIX_PROGRAM_GROUP_KIND_HITGROUP,
-        occlusion_sphere_prog_group_desc.hitgroup.moduleIS           = state.geometry_module;
-    occlusion_sphere_prog_group_desc.hitgroup.entryFunctionNameIS    = "__intersection__sphere";
-    occlusion_sphere_prog_group_desc.hitgroup.moduleCH               = nullptr;
-    occlusion_sphere_prog_group_desc.hitgroup.entryFunctionNameCH    = nullptr;
-    occlusion_sphere_prog_group_desc.hitgroup.moduleAH               = state.shading_module;
-    occlusion_sphere_prog_group_desc.hitgroup.entryFunctionNameAH    = "__anyhit__full_occlusion";
-
-    OPTIX_CHECK_LOG( optixProgramGroupCreate(
-        state.context,
-        &occlusion_sphere_prog_group_desc,
-        1,
-        &occlusion_sphere_prog_group_options,
-        log,
-        &sizeof_log,
-        &occlusion_sphere_prog_group ) );
-
-    program_groups.push_back(occlusion_sphere_prog_group);
-    state.occlusion_metal_sphere_prog_group = occlusion_sphere_prog_group;
+    OPTIX_CHECK( optixLaunch(
+                scene.pipeline(),
+                0,             // stream
+                reinterpret_cast<CUdeviceptr>( d_params ),
+                sizeof( whitted::LaunchParams ),
+                scene.sbt(),
+                width,  // launch width
+                height, // launch height
+                1       // launch depth
+                ) );
+    output_buffer.unmap();
+    CUDA_SYNC_CHECK();
 }
 
-static void createFloorProgram( WhittedState &state, std::vector<OptixProgramGroup> &program_groups )
+
+void displaySubframe(
+        sutil::CUDAOutputBuffer<uchar4>&  output_buffer,
+        sutil::GLDisplay&                 gl_display,
+        GLFWwindow*                       window )
 {
-    OptixProgramGroup           radiance_floor_prog_group;
-    OptixProgramGroupOptions    radiance_floor_prog_group_options = {};
-    OptixProgramGroupDesc       radiance_floor_prog_group_desc = {};
-    radiance_floor_prog_group_desc.kind   = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
-    radiance_floor_prog_group_desc.hitgroup.moduleIS               = state.geometry_module;
-    radiance_floor_prog_group_desc.hitgroup.entryFunctionNameIS    = "__intersection__parallelogram";
-    radiance_floor_prog_group_desc.hitgroup.moduleCH               = state.shading_module;
-    radiance_floor_prog_group_desc.hitgroup.entryFunctionNameCH    = "__closesthit__checker_radiance";
-    radiance_floor_prog_group_desc.hitgroup.moduleAH               = nullptr;
-    radiance_floor_prog_group_desc.hitgroup.entryFunctionNameAH    = nullptr;
-
-    char    log[2048];
-    size_t  sizeof_log = sizeof( log );
-    OPTIX_CHECK_LOG( optixProgramGroupCreate(
-        state.context,
-        &radiance_floor_prog_group_desc,
-        1,
-        &radiance_floor_prog_group_options,
-        log,
-        &sizeof_log,
-        &radiance_floor_prog_group ) );
-
-    program_groups.push_back(radiance_floor_prog_group);
-    state.radiance_floor_prog_group = radiance_floor_prog_group;
-
-    OptixProgramGroup           occlusion_floor_prog_group;
-    OptixProgramGroupOptions    occlusion_floor_prog_group_options = {};
-    OptixProgramGroupDesc       occlusion_floor_prog_group_desc = {};
-    occlusion_floor_prog_group_desc.kind   = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
-    occlusion_floor_prog_group_desc.hitgroup.moduleIS               = state.geometry_module;
-    occlusion_floor_prog_group_desc.hitgroup.entryFunctionNameIS    = "__intersection__parallelogram";
-    occlusion_floor_prog_group_desc.hitgroup.moduleCH               = nullptr;
-    occlusion_floor_prog_group_desc.hitgroup.entryFunctionNameCH    = nullptr;
-    occlusion_floor_prog_group_desc.hitgroup.moduleAH               = state.shading_module;
-    occlusion_floor_prog_group_desc.hitgroup.entryFunctionNameAH    = "__anyhit__full_occlusion";
-
-    OPTIX_CHECK_LOG( optixProgramGroupCreate(
-        state.context,
-        &occlusion_floor_prog_group_desc,
-        1,
-        &occlusion_floor_prog_group_options,
-        log,
-        &sizeof_log,
-        &occlusion_floor_prog_group ) );
-
-    program_groups.push_back(occlusion_floor_prog_group);
-    state.occlusion_floor_prog_group = occlusion_floor_prog_group;
+    // Display
+    int framebuf_res_x = 0;   // The display's resolution (could be HDPI res)
+    int framebuf_res_y = 0;   //
+    glfwGetFramebufferSize( window, &framebuf_res_x, &framebuf_res_y );
+    gl_display.display(
+            output_buffer.width(),
+            output_buffer.height(),
+            framebuf_res_x,
+            framebuf_res_y,
+            output_buffer.getPBO()
+            );
 }
 
-static void createMissProgram( WhittedState &state, std::vector<OptixProgramGroup> &program_groups )
+
+void initCameraState( const sutil::Scene& scene )
 {
-    OptixProgramGroupOptions    miss_prog_group_options = {};
-    OptixProgramGroupDesc       miss_prog_group_desc = {};
-    miss_prog_group_desc.kind   = OPTIX_PROGRAM_GROUP_KIND_MISS;
-    miss_prog_group_desc.miss.module             = state.shading_module;
-    miss_prog_group_desc.miss.entryFunctionName  = "__miss__constant_bg";
-
-    char    log[2048];
-    size_t  sizeof_log = sizeof( log );
-    OPTIX_CHECK_LOG( optixProgramGroupCreate(
-        state.context,
-        &miss_prog_group_desc,
-        1,
-        &miss_prog_group_options,
-        log,
-        &sizeof_log,
-        &state.radiance_miss_prog_group ) );
-
-    miss_prog_group_desc.miss = {
-        nullptr,    // module
-        nullptr     // entryFunctionName
-    };
-    OPTIX_CHECK_LOG( optixProgramGroupCreate(
-        state.context,
-        &miss_prog_group_desc,
-        1,
-        &miss_prog_group_options,
-        log,
-        &sizeof_log,
-        &state.occlusion_miss_prog_group ) );
-}
-
-void createPipeline( WhittedState &state )
-{
-    std::vector<OptixProgramGroup> program_groups;
-
-    state.pipeline_compile_options = {
-        false,                                                  // usesMotionBlur
-        OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS,          // traversableGraphFlags
-        5,    /* RadiancePRD uses 5 payloads */                 // numPayloadValues
-        5,    /* Parallelogram intersection uses 5 attrs */     // numAttributeValues
-        OPTIX_EXCEPTION_FLAG_NONE,                              // exceptionFlags
-        "params"                                                // pipelineLaunchParamsVariableName
-    };
-
-    // Prepare program groups
-    createModules( state );
-    createCameraProgram( state, program_groups );
-    createGlassSphereProgram( state, program_groups );
-    createMetalSphereProgram( state, program_groups );
-    createFloorProgram( state, program_groups );
-    createMissProgram( state, program_groups );
-
-    // Link program groups to pipeline
-    OptixPipelineLinkOptions pipeline_link_options = {
-        max_trace,                          // maxTraceDepth
-        OPTIX_COMPILE_DEBUG_LEVEL_FULL,     // debugLevel
-        false                               // overrideUsesMotionBlur
-    };
-    char    log[2048];
-    size_t  sizeof_log = sizeof(log);
-    OPTIX_CHECK_LOG( optixPipelineCreate(
-        state.context,
-        &state.pipeline_compile_options,
-        &pipeline_link_options,
-        program_groups.data(),
-        static_cast<unsigned int>( program_groups.size() ),
-        log,
-        &sizeof_log,
-        &state.pipeline ) );
-}
-
-void syncCameraDataToSbt( WhittedState &state, const CameraData& camData )
-{
-    RayGenRecord rg_sbt;
-
-    optixSbtRecordPackHeader( state.raygen_prog_group, &rg_sbt );
-    rg_sbt.data = camData;
-
-    CUDA_CHECK( cudaMemcpy(
-        reinterpret_cast<void*>( state.sbt.raygenRecord ),
-        &rg_sbt,
-        sizeof( RayGenRecord ),
-        cudaMemcpyHostToDevice
-    ) );
-}
-
-void createSBT( WhittedState &state )
-{
-    // Raygen program record
-    {
-        CUdeviceptr d_raygen_record;
-        size_t sizeof_raygen_record = sizeof( RayGenRecord );
-        CUDA_CHECK( cudaMalloc(
-            reinterpret_cast<void**>( &d_raygen_record ),
-            sizeof_raygen_record ) );
-
-        state.sbt.raygenRecord = d_raygen_record;
-    }
-
-    // Miss program record
-    {
-        CUdeviceptr d_miss_record;
-        size_t sizeof_miss_record = sizeof( MissRecord );
-        CUDA_CHECK( cudaMalloc(
-            reinterpret_cast<void**>( &d_miss_record ),
-            sizeof_miss_record*RAY_TYPE_COUNT ) );
-
-        MissRecord ms_sbt[RAY_TYPE_COUNT];
-        optixSbtRecordPackHeader( state.radiance_miss_prog_group, &ms_sbt[0] );
-        optixSbtRecordPackHeader( state.occlusion_miss_prog_group, &ms_sbt[1] );
-        ms_sbt[1].data = ms_sbt[0].data = { 0.34f, 0.55f, 0.85f };
-
-        CUDA_CHECK( cudaMemcpy(
-            reinterpret_cast<void*>( d_miss_record ),
-            ms_sbt,
-            sizeof_miss_record*RAY_TYPE_COUNT,
-            cudaMemcpyHostToDevice
-        ) );
-
-        state.sbt.missRecordBase          = d_miss_record;
-        state.sbt.missRecordCount         = RAY_TYPE_COUNT;
-        state.sbt.missRecordStrideInBytes = static_cast<uint32_t>( sizeof_miss_record );
-    }
-
-    // Hitgroup program record
-    {
-        const size_t count_records = RAY_TYPE_COUNT * OBJ_COUNT;
-        HitGroupRecord hitgroup_records[count_records];
-
-        // Note: Fill SBT record array the same order like AS is built.
-        int sbt_idx = 0;
-
-        // Metal Sphere
-        OPTIX_CHECK( optixSbtRecordPackHeader(
-            state.radiance_metal_sphere_prog_group,
-            &hitgroup_records[sbt_idx] ) );
-        hitgroup_records[ sbt_idx ].data.geometry.sphere = g_sphere;
-        hitgroup_records[ sbt_idx ].data.shading.metal = {
-            { 0.2f, 0.5f, 0.5f },   // Ka
-            { 0.2f, 0.7f, 0.8f },   // Kd
-            { 0.9f, 0.9f, 0.9f },   // Ks
-            { 0.5f, 0.5f, 0.5f },   // Kr
-            64,                     // phong_exp
-        };
-        sbt_idx ++;
-
-        OPTIX_CHECK( optixSbtRecordPackHeader(
-            state.occlusion_metal_sphere_prog_group,
-            &hitgroup_records[sbt_idx] ) );
-        hitgroup_records[ sbt_idx ].data.geometry.sphere = g_sphere;
-        sbt_idx ++;
-
-        // Glass Sphere
-        OPTIX_CHECK( optixSbtRecordPackHeader(
-            state.radiance_glass_sphere_prog_group,
-            &hitgroup_records[sbt_idx] ) );
-        hitgroup_records[ sbt_idx ].data.geometry.sphere_shell = g_sphere_shell;
-        hitgroup_records[ sbt_idx ].data.shading.glass = {
-            1e-2f,                                  // importance_cutoff
-            { 0.034f, 0.055f, 0.085f },             // cutoff_color
-            3.0f,                                   // fresnel_exponent
-            0.1f,                                   // fresnel_minimum
-            1.0f,                                   // fresnel_maximum
-            1.4f,                                   // refraction_index
-            { 1.0f, 1.0f, 1.0f },                   // refraction_color
-            { 1.0f, 1.0f, 1.0f },                   // reflection_color
-            { logf(.83f), logf(.83f), logf(.83f) }, // extinction_constant
-            { 0.6f, 0.6f, 0.6f },                   // shadow_attenuation
-            10,                                     // refraction_maxdepth
-            5                                       // reflection_maxdepth
-        };
-        sbt_idx ++;
-
-        OPTIX_CHECK( optixSbtRecordPackHeader(
-            state.occlusion_glass_sphere_prog_group,
-            &hitgroup_records[sbt_idx] ) );
-        hitgroup_records[ sbt_idx ].data.geometry.sphere_shell = g_sphere_shell;
-        hitgroup_records[ sbt_idx ].data.shading.glass.shadow_attenuation = { 0.6f, 0.6f, 0.6f };
-        sbt_idx ++;
-
-        // Floor
-        OPTIX_CHECK( optixSbtRecordPackHeader(
-            state.radiance_floor_prog_group,
-            &hitgroup_records[sbt_idx] ) );
-        hitgroup_records[ sbt_idx ].data.geometry.parallelogram = g_floor;
-        hitgroup_records[ sbt_idx ].data.shading.checker = {
-            { 0.8f, 0.3f, 0.15f },      // Kd1
-            { 0.9f, 0.85f, 0.05f },     // Kd2
-            { 0.8f, 0.3f, 0.15f },      // Ka1
-            { 0.9f, 0.85f, 0.05f },     // Ka2
-            { 0.0f, 0.0f, 0.0f },       // Ks1
-            { 0.0f, 0.0f, 0.0f },       // Ks2
-            { 0.0f, 0.0f, 0.0f },       // Kr1
-            { 0.0f, 0.0f, 0.0f },       // Kr2
-            0.0f,                       // phong_exp1
-            0.0f,                       // phong_exp2
-            { 32.0f, 16.0f }            // inv_checker_size
-        };
-        sbt_idx++;
-
-        OPTIX_CHECK( optixSbtRecordPackHeader(
-            state.occlusion_floor_prog_group,
-            &hitgroup_records[sbt_idx] ) );
-        hitgroup_records[ sbt_idx ].data.geometry.parallelogram = g_floor;
-
-        CUdeviceptr d_hitgroup_records;
-        size_t      sizeof_hitgroup_record = sizeof( HitGroupRecord );
-        CUDA_CHECK( cudaMalloc(
-            reinterpret_cast<void**>( &d_hitgroup_records ),
-            sizeof_hitgroup_record*count_records
-        ) );
-
-        CUDA_CHECK( cudaMemcpy(
-            reinterpret_cast<void*>( d_hitgroup_records ),
-            hitgroup_records,
-            sizeof_hitgroup_record*count_records,
-            cudaMemcpyHostToDevice
-        ) );
-
-        state.sbt.hitgroupRecordBase            = d_hitgroup_records;
-        state.sbt.hitgroupRecordCount           = count_records;
-        state.sbt.hitgroupRecordStrideInBytes   = static_cast<uint32_t>( sizeof_hitgroup_record );
-    }
-}
-
-static void context_log_cb( unsigned int level, const char* tag, const char* message, void* /*cbdata */)
-{
-    std::cerr << "[" << std::setw( 2 ) << level << "][" << std::setw( 12 ) << tag << "]: "
-              << message << "\n";
-}
-
-void createContext( WhittedState& state )
-{
-    // Initialize CUDA
-    CUDA_CHECK( cudaFree( 0 ) );
-
-    OptixDeviceContext context;
-    CUcontext          cuCtx = 0;  // zero means take the current context
-    OPTIX_CHECK( optixInit() );
-    OptixDeviceContextOptions options = {};
-    options.logCallbackFunction       = &context_log_cb;
-    options.logCallbackLevel          = 4;
-    OPTIX_CHECK( optixDeviceContextCreate( cuCtx, &options, &context ) );
-
-    state.context = context;
-}
-
-//
-//
-//
-
-void initCameraState()
-{
-    camera.setEye( make_float3( 8.0f, 2.0f, -4.0f ) );
-    camera.setLookat( make_float3( 4.0f, 2.3f, -4.0f ) );
-    camera.setUp( make_float3( 0.0f, 1.0f, 0.0f ) );
-    camera.setFovY( 60.0f );
+    camera = scene.camera();
     camera_changed = true;
 
     trackball.setCamera( &camera );
@@ -1003,130 +322,33 @@ void initCameraState()
     trackball.setGimbalLock(true);
 }
 
-void handleCameraUpdate( WhittedState &state )
+
+void cleanup()
 {
-    if( !camera_changed )
-        return;
-    camera_changed = false;
-
-    camera.setAspectRatio( static_cast<float>( state.params.width ) / static_cast<float>( state.params.height ) );
-    CameraData camData;
-    camData.eye = camera.eye();
-    camera.UVWFrame( camData.U, camData.V, camData.W );
-
-    syncCameraDataToSbt(state, camData);
-}
-
-void handleResize( sutil::CUDAOutputBuffer<uchar4>& output_buffer, Params& params )
-{
-    if( !resize_dirty )
-        return;
-    resize_dirty = false;
-
-    output_buffer.resize( params.width, params.height );
-
-    // Realloc accumulation buffer
-    CUDA_CHECK( cudaFree( reinterpret_cast<void*>( params.accum_buffer ) ) );
-    CUDA_CHECK( cudaMalloc(
-        reinterpret_cast<void**>( &params.accum_buffer ),
-        params.width*params.height*sizeof(float4)
-    ) );
-}
-
-void updateState( sutil::CUDAOutputBuffer<uchar4>& output_buffer, WhittedState &state )
-{
-    // Update params on device
-    if( camera_changed || resize_dirty )
-        state.params.subframe_index = 0;
-
-    handleCameraUpdate( state );
-    handleResize( output_buffer, state.params );
-}
-
-void launchSubframe( sutil::CUDAOutputBuffer<uchar4>& output_buffer, WhittedState& state )
-{
-    // Launch
-    uchar4* result_buffer_data = output_buffer.map();
-    state.params.frame_buffer = result_buffer_data;
-    CUDA_CHECK( cudaMemcpyAsync( reinterpret_cast<void*>( state.d_params ),
-                                 &state.params,
-                                 sizeof( Params ),
-                                 cudaMemcpyHostToDevice,
-                                 state.stream
-    ) );
-
-    OPTIX_CHECK( optixLaunch(
-        state.pipeline,
-        state.stream,
-        reinterpret_cast<CUdeviceptr>( state.d_params ),
-        sizeof( Params ),
-        &state.sbt,
-        state.params.width,  // launch width
-        state.params.height, // launch height
-        1                    // launch depth
-    ) );
-
-    output_buffer.unmap();
-    CUDA_SYNC_CHECK();
-
+    CUDA_CHECK( cudaFree( reinterpret_cast<void*>( params.accum_buffer    ) ) );
+    CUDA_CHECK( cudaFree( reinterpret_cast<void*>( params.lights.data     ) ) );
+    CUDA_CHECK( cudaFree( reinterpret_cast<void*>( d_params               ) ) );
 }
 
 
-void displaySubframe(
-    sutil::CUDAOutputBuffer<uchar4>&  output_buffer,
-    sutil::GLDisplay&                 gl_display,
-    GLFWwindow*                       window )
-{
-    // Display
-    int framebuf_res_x = 0;   // The display's resolution (could be HDPI res)
-    int framebuf_res_y = 0;   //
-    glfwGetFramebufferSize( window, &framebuf_res_x, &framebuf_res_y );
-    gl_display.display(
-        output_buffer.width(),
-        output_buffer.height(),
-        framebuf_res_x,
-        framebuf_res_y,
-        output_buffer.getPBO()
-    );
-}
-
-
-void cleanupState( WhittedState& state )
-{
-    OPTIX_CHECK( optixPipelineDestroy     ( state.pipeline                ) );
-    OPTIX_CHECK( optixProgramGroupDestroy ( state.raygen_prog_group       ) );
-    OPTIX_CHECK( optixProgramGroupDestroy ( state.radiance_metal_sphere_prog_group ) );
-    OPTIX_CHECK( optixProgramGroupDestroy ( state.occlusion_metal_sphere_prog_group ) );
-    OPTIX_CHECK( optixProgramGroupDestroy ( state.radiance_glass_sphere_prog_group ) );
-    OPTIX_CHECK( optixProgramGroupDestroy ( state.occlusion_glass_sphere_prog_group ) );
-    OPTIX_CHECK( optixProgramGroupDestroy ( state.radiance_miss_prog_group         ) );
-    OPTIX_CHECK( optixProgramGroupDestroy ( state.radiance_floor_prog_group        ) );
-    OPTIX_CHECK( optixProgramGroupDestroy ( state.occlusion_floor_prog_group       ) );
-    OPTIX_CHECK( optixModuleDestroy       ( state.shading_module          ) );
-    OPTIX_CHECK( optixModuleDestroy       ( state.geometry_module         ) );
-    OPTIX_CHECK( optixModuleDestroy       ( state.camera_module           ) );
-    OPTIX_CHECK( optixDeviceContextDestroy( state.context                 ) );
-
-
-    CUDA_CHECK( cudaFree( reinterpret_cast<void*>( state.sbt.raygenRecord       ) ) );
-    CUDA_CHECK( cudaFree( reinterpret_cast<void*>( state.sbt.missRecordBase     ) ) );
-    CUDA_CHECK( cudaFree( reinterpret_cast<void*>( state.sbt.hitgroupRecordBase ) ) );
-    CUDA_CHECK( cudaFree( reinterpret_cast<void*>( state.d_gas_output_buffer    ) ) );
-    CUDA_CHECK( cudaFree( reinterpret_cast<void*>( state.params.accum_buffer    ) ) );
-    CUDA_CHECK( cudaFree( reinterpret_cast<void*>( state.d_params               ) ) );
-}
+//------------------------------------------------------------------------------
+//
+// Main
+//
+//------------------------------------------------------------------------------
 
 int main( int argc, char* argv[] )
 {
-    WhittedState state;
-    state.params.width  = 768;
-    state.params.height = 768;
     sutil::CUDAOutputBufferType output_buffer_type = sutil::CUDAOutputBufferType::GL_INTEROP;
 
     //
     // Parse command line options
     //
     std::string outfile;
+    //std::string infile = sutil::sampleDataFilePath( "WaterBottle/WaterBottle.gltf" );
+    //std::string infile = sutil::sampleDataFilePath( "Buggy/Buggy.gltf" );
+    std::string infile = sutil::sampleDataFilePath( "Buggy/Buggy.gltf" );
+
 
     for( int i = 1; i < argc; ++i )
     {
@@ -1139,11 +361,23 @@ int main( int argc, char* argv[] )
         {
             output_buffer_type = sutil::CUDAOutputBufferType::CUDA_DEVICE;
         }
+        else if( arg == "--model" )
+        {
+            if( i >= argc - 1 )
+                printUsageAndExit( argv[0] );
+            infile = argv[++i];
+        }
         else if( arg == "--file" || arg == "-f" )
         {
             if( i >= argc - 1 )
                 printUsageAndExit( argv[0] );
             outfile = argv[++i];
+        }
+        else if( arg == "--launch-samples" || arg == "-s" )
+        {
+            if( i >= argc - 1 )
+                printUsageAndExit( argv[0] );
+            samples_per_launch = atoi( argv[++i] );
         }
         else
         {
@@ -1152,61 +386,56 @@ int main( int argc, char* argv[] )
         }
     }
 
+    if( infile.empty() )
+    {
+        std::cerr << "--model argument required" << std::endl;
+        printUsageAndExit( argv[0] );
+    }
+
+
     try
     {
-        initCameraState();
+        sutil::Scene scene;
+        sutil::loadScene( infile.c_str(), scene );
+        scene.finalize();
 
-        //
-        // Set up OptiX state
-        //
-        createContext  ( state );
-        createGeomety  ( state );
-        createPipeline ( state );
-        createSBT      ( state );
+        OPTIX_CHECK( optixInit() ); // Need to initialize function table
+        initCameraState( scene );
+        initLaunchParams( scene );
 
-        initLaunchParams( state );
 
-        //
-        // Render loop
-        //
         if( outfile.empty() )
         {
-            GLFWwindow* window = sutil::initUI( "Multi-Camera", state.params.width, state.params.height );
+            GLFWwindow* window = sutil::initUI( "optixMeshViewer", width, height );
             glfwSetMouseButtonCallback( window, mouseButtonCallback );
             glfwSetCursorPosCallback  ( window, cursorPosCallback   );
             glfwSetWindowSizeCallback ( window, windowSizeCallback  );
             glfwSetKeyCallback        ( window, keyCallback         );
             glfwSetScrollCallback     ( window, scrollCallback      );
-            glfwSetWindowUserPointer  ( window, &state.params       );
+            glfwSetWindowUserPointer  ( window, &params       );
 
-
+            //
+            // Render loop
+            //
             {
-                // output_buffer needs to be destroyed before cleanupUI is called
-                sutil::CUDAOutputBuffer<uchar4> output_buffer(
-                        output_buffer_type,
-                        state.params.width,
-                        state.params.height
-                        );
-
-                output_buffer.setStream( state.stream );
+                sutil::CUDAOutputBuffer<uchar4> output_buffer( output_buffer_type, width, height );
                 sutil::GLDisplay gl_display;
 
                 std::chrono::duration<double> state_update_time( 0.0 );
                 std::chrono::duration<double> render_time( 0.0 );
                 std::chrono::duration<double> display_time( 0.0 );
-                
 
                 do
                 {
                     auto t0 = std::chrono::steady_clock::now();
                     glfwPollEvents();
 
-                    updateState( output_buffer, state );
+                    updateState( output_buffer, params );
                     auto t1 = std::chrono::steady_clock::now();
                     state_update_time += t1 - t0;
                     t0 = t1;
 
-                    launchSubframe( output_buffer, state );
+                    launchSubframe( output_buffer, scene );
                     t1 = std::chrono::steady_clock::now();
                     render_time += t1 - t0;
                     t0 = t1;
@@ -1217,39 +446,36 @@ int main( int argc, char* argv[] )
 
                     sutil::displayStats( state_update_time, render_time, display_time );
 
-                    glfwSwapBuffers( window );
+                    glfwSwapBuffers(window);
 
-                    ++state.params.subframe_index;
+                    ++params.subframe_index;
                 }
                 while( !glfwWindowShouldClose( window ) );
-
+                CUDA_SYNC_CHECK();
             }
+
             sutil::cleanupUI( window );
         }
         else
         {
-            if ( output_buffer_type == sutil::CUDAOutputBufferType::GL_INTEROP )
-            {
-                sutil::initGLFW(); // For GL context
-                sutil::initGL();
-            }
+			if( output_buffer_type == sutil::CUDAOutputBufferType::GL_INTEROP )
+			{
+				sutil::initGLFW(); // For GL context
+				sutil::initGL();
+			}
 
-            sutil::CUDAOutputBuffer<uchar4> output_buffer(
-                    output_buffer_type,
-                    state.params.width,
-                    state.params.height
-                    );
+			sutil::CUDAOutputBuffer<uchar4> output_buffer(output_buffer_type, width, height);
+			handleCameraUpdate( params);
+			handleResize( output_buffer );
+			launchSubframe( output_buffer, scene );
 
-            handleCameraUpdate( state );
-            handleResize( output_buffer, state.params );
-            launchSubframe( output_buffer, state );
+			sutil::ImageBuffer buffer;
+			buffer.data = output_buffer.getHostPointer();
+			buffer.width = output_buffer.width();
+			buffer.height = output_buffer.height();
+			buffer.pixel_format = sutil::BufferImageFormat::UNSIGNED_BYTE4;
 
-            sutil::ImageBuffer buffer;
-            buffer.data         = output_buffer.getHostPointer();
-            buffer.width        = output_buffer.width();
-            buffer.height       = output_buffer.height();
-            buffer.pixel_format = sutil::BufferImageFormat::UNSIGNED_BYTE4;
-            sutil::displayBufferFile( outfile.c_str(), buffer, false );
+			sutil::displayBufferFile(outfile.c_str(), buffer, false);
 
             if( output_buffer_type == sutil::CUDAOutputBufferType::GL_INTEROP )
             {
@@ -1257,12 +483,8 @@ int main( int argc, char* argv[] )
             }
         }
 
-        // Cleanup
-        // ImGui_ImplOpenGL2_Shutdown();
-        // ImGui_ImplGlfw_Shutdown();
-        // ImGui::DestroyContext();
+        cleanup();
 
-        cleanupState( state );
     }
     catch( std::exception& e )
     {

@@ -27,15 +27,16 @@
 //
 
 #include <optix.h>
-#include <optix_function_table_definition.h>
+//#include <optix_function_table_definition.h>
 #include <optix_stubs.h>
 
+// #include <cuda/cubistShading.h>
 #include <cuda/whitted.h>
 #include <sutil/Exception.h>
 #include <sutil/Matrix.h>
 #include <sutil/Quaternion.h>
 #include <sutil/Record.h>
-#include <sutil/Scene.h>
+#include <scene.h>
 #include <sutil/sutil.h>
 
 #define TINYGLTF_IMPLEMENTATION

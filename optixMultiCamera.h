@@ -33,6 +33,7 @@
 #include <optix_types.h>
 #include <sutil/vec_math.h>
 
+
 enum RayType
 {
     RAY_TYPE_RADIANCE  = 0,
