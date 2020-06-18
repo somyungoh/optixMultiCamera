@@ -35,6 +35,10 @@
 #include <optix_function_table_definition.h>
 #include <optix_stubs.h>
 
+// Image loader
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 #include <sampleConfig.h>
 
 #include <cuda/cubistShading.h>
@@ -397,6 +401,18 @@ int main( int argc, char* argv[] )
     {
         sutil::Scene scene;
         sutil::loadScene( infile.c_str(), scene );
+        //scene.finalize();
+
+        // :::::::::::::::::::::::::::::::  Multi-Camera ::::::::::::::::::::::::::::::::: //
+
+        std::string textureFilename( sutil::sampleDataFilePath( "Env/leadenhall_market_2k.hdr" ) );
+
+        int    n_width, n_height, n_channels;
+        u_char *env_data = stbi_load( textureFilename.c_str(), &n_width, &n_height, &n_channels, 3 );   // 3 desired channels
+        scene.addImage(n_width, n_height, sizeof(u_char) * 8, n_channels, env_data);
+
+        // :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: //
+
         scene.finalize();
 
         OPTIX_CHECK( optixInit() ); // Need to initialize function table
