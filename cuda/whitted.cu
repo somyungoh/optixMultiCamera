@@ -36,8 +36,6 @@
 
 #include <stdio.h>
 
-#define OPTIX_CUBIST_ENABLED
-
 extern "C"
 {
 __constant__ whitted::LaunchParams params;
@@ -205,8 +203,28 @@ extern "C" __global__ void __raygen__pinhole()
             ( static_cast<float>( launch_idx.x ) + subpixel_jitter.x ) / static_cast<float>( launch_dims.x ),
             ( static_cast<float>( launch_idx.y ) + subpixel_jitter.y ) / static_cast<float>( launch_dims.y )
             ) - 1.0f;
-    const float3 ray_direction = normalize(d.x*U + d.y*V + W);
+    float3 ray_direction = normalize(d.x*U + d.y*V + W);
     const float3 ray_origin    = eye;
+
+    // :::: Multi-Camera :::: //
+
+    if( params.isCameraPaint )
+    {
+        int4 tex_c = tex2D<int4>(
+            params.cam_texture.texture,
+            static_cast<float> ( params.cam_texture.width * ( float ) launch_idx.x ) / static_cast<float>( launch_dims.x ),
+            static_cast<float> ( params.cam_texture.height * ( float ) launch_idx.y ) / static_cast<float>( launch_dims.y ) 
+        );
+
+        float3 ray_c = normalize( make_float3( tex_c.x, tex_c.y, tex_c.z ) - 0.5 );
+
+        ray_direction = normalize(
+            (d.x + ray_c.x * 0.1 ) * U +
+            (d.y + ray_c.y * 0.1 ) * V +
+            W );
+    }
+    // :::::::::::::::::::::: //
+
 
     //
     // Trace camera ray
@@ -231,28 +249,6 @@ extern "C" __global__ void __raygen__pinhole()
     const uint32_t image_index  = launch_idx.y * launch_dims.x + launch_idx.x;
     float3         accum_color  = payload.result;
 
-
-    // :::::::::::::::::::::::::::::::  Multi-Camera ::::::::::::::::::::::::::::::::: //
-    
-#ifdef OPTIX_CUBIST_ENABLED
-
-    float3   new_raydir = normalize (ray_direction + accum_color * 0.2);
-    
-    traceRadiance (
-        params.handle,
-        ray_origin,
-        new_raydir,
-        0.01f,  // tmin       // TODO: smarter offset
-        1e16f,  // tmax
-        &payload );
-    
-    accum_color = payload.result;
-
-#endif
-
-    // :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: //
-
-
     if( subframe_index > 0 )
     {
         const float                 a = 1.0f / static_cast<float>( subframe_index+1 );
@@ -266,32 +262,6 @@ extern "C" __global__ void __raygen__pinhole()
 
 extern "C" __global__ void __miss__constant_radiance()
 {
-    
-    // :::::::::::::::::::::::::::::::  Multi-Camera ::::::::::::::::::::::::::::::::: //
-    
-    // #ifdef OPTIX_CUBIST_ENABLED
-    
-    // whitted::PayloadRadiance payload;
-    
-    // float3 ray_origin    = optixGetWorldRayOrigin();
-    // float3 ray_direction = optixGetWorldRayDirection();
-    // float3 new_raydir    = normalize (ray_direction + params.miss_color * 0.2); // this can be replaced with envmap
-    
-    // traceRadiance (
-    //     params.handle,
-    //     ray_origin,
-    //     new_raydir,
-    //     0.01f,  // tmin       // TODO: smarter offset
-    //     1e16f,  // tmax
-    //     &payload );
-        
-    // setPayloadResult( payload.result );
-    // return;
-        
-     // #endif
-        
-    // :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: //
-    
     setPayloadResult( params.miss_color );
 }
 
